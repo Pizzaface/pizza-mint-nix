@@ -62,6 +62,123 @@ log() {
   echo "[nix-bootstrap] $*"
 }
 
+# --- Desktop progress indicator ---
+PROGRESS_PIPE=""
+PROGRESS_PID=""
+
+# Find user's display environment for GUI notifications
+find_user_display() {
+  local user="$1"
+  # Try common display values
+  for display in ":0" ":1"; do
+    if [[ -e "/tmp/.X11-unix/X${display#:}" ]]; then
+      echo "$display"
+      return 0
+    fi
+  done
+  # Fallback: check user's processes for DISPLAY
+  local user_display
+  user_display="$(pgrep -u "$user" -a 2>/dev/null | head -1 | xargs -0 -I{} bash -c 'tr "\0" "\n" < /proc/{}/environ 2>/dev/null | grep ^DISPLAY= | cut -d= -f2' || true)"
+  if [[ -n "$user_display" ]]; then
+    echo "$user_display"
+    return 0
+  fi
+  echo ":0"
+}
+
+# Run a command on the user's desktop
+gui_as_user() {
+  local user="$1"
+  shift
+  local display
+  display="$(find_user_display "$user")"
+  local xauthority="/home/$user/.Xauthority"
+
+  if [[ ! -e "$xauthority" ]]; then
+    xauthority="/run/user/$(id -u "$user")/gdm/Xauthority"
+  fi
+
+  as_user "$user" env \
+    DISPLAY="$display" \
+    XAUTHORITY="$xauthority" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$user")/bus" \
+    "$@"
+}
+
+# Start the progress dialog
+start_progress() {
+  if [[ "$BOOTSTRAP_TEST_MODE" == "1" ]]; then
+    return 0
+  fi
+
+  # Ensure zenity is available
+  if ! command -v zenity >/dev/null 2>&1; then
+    log "zenity not available; skipping progress dialog."
+    return 0
+  fi
+
+  PROGRESS_PIPE="$(mktemp -u)"
+  mkfifo "$PROGRESS_PIPE"
+
+  # Start zenity progress dialog in background
+  gui_as_user "$BOOTSTRAP_USER" zenity --progress \
+    --title="System Setup" \
+    --text="Starting first-boot setup..." \
+    --percentage=0 \
+    --auto-close \
+    --no-cancel \
+    --width=400 \
+    < "$PROGRESS_PIPE" &
+  PROGRESS_PID=$!
+
+  # Open the pipe for writing (keeps it open)
+  exec 3>"$PROGRESS_PIPE"
+}
+
+# Update progress: update_progress <percentage> <message>
+update_progress() {
+  local pct="$1"
+  local msg="$2"
+  log "$msg"
+
+  if [[ -n "$PROGRESS_PIPE" && -p "$PROGRESS_PIPE" ]]; then
+    echo "$pct" >&3 2>/dev/null || true
+    echo "# $msg" >&3 2>/dev/null || true
+  fi
+}
+
+# Close progress dialog
+close_progress() {
+  if [[ -n "$PROGRESS_PIPE" ]]; then
+    echo "100" >&3 2>/dev/null || true
+    exec 3>&- 2>/dev/null || true
+    rm -f "$PROGRESS_PIPE" 2>/dev/null || true
+  fi
+  if [[ -n "$PROGRESS_PID" ]]; then
+    wait "$PROGRESS_PID" 2>/dev/null || true
+  fi
+}
+
+# Show completion notification
+show_complete_notification() {
+  if [[ "$BOOTSTRAP_TEST_MODE" == "1" ]]; then
+    return 0
+  fi
+
+  if command -v zenity >/dev/null 2>&1; then
+    gui_as_user "$BOOTSTRAP_USER" zenity --info \
+      --title="Setup Complete" \
+      --text="First-boot setup finished successfully!\n\nYou may need to log out and back in for all changes to take effect." \
+      --width=350 &
+  fi
+}
+
+# Cleanup on exit
+cleanup_progress() {
+  close_progress
+}
+trap cleanup_progress EXIT
+
 export DEBIAN_FRONTEND=noninteractive
 
 if [[ -f /etc/default/nix-bootstrap ]]; then
@@ -111,10 +228,14 @@ apt_install() {
 }
 
 apt-get update
-apt_install ca-certificates curl git xz-utils flatpak gpg sudo
+apt_install ca-certificates curl git xz-utils flatpak gpg sudo zenity
+
+# Start progress dialog after zenity is available
+start_progress
+update_progress 5 "Installing base packages..."
 
 if [[ "$BOOTSTRAP_SKIP_FLATPAK" != "1" ]]; then
-  # Ensure Flathub is available.
+  update_progress 10 "Configuring Flathub repository..."
   flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
 fi
 
@@ -126,9 +247,11 @@ elif [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
     exit 1
   fi
 
-  log "Installing Nix (multi-user daemon)..."
+  update_progress 15 "Installing Nix package manager (this may take a few minutes)..."
   curl --proto '=https' --tlsv1.2 -fsSL https://nixos.org/nix/install | sh -s -- --daemon
 fi
+
+update_progress 30 "Configuring Nix..."
 
 mkdir -p /etc/nix
 if [[ ! -f /etc/nix/nix.conf ]]; then
@@ -145,6 +268,7 @@ fi
 if [[ "$BOOTSTRAP_SKIP_SYSTEMD" == "1" ]]; then
   log "Skipping systemd integration (BOOTSTRAP_SKIP_SYSTEMD=1)."
 elif command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  update_progress 35 "Starting Nix daemon..."
   systemctl daemon-reload || true
   systemctl enable --now nix-daemon.socket >/dev/null 2>&1 || true
   systemctl start nix-daemon.service >/dev/null 2>&1 || true
@@ -152,19 +276,36 @@ else
   log "systemd not available; skipping nix-daemon systemctl steps."
 fi
 
-# --- GUI apps: Flatpak-first ---
+# --- GUI apps: Flatpak-first (parallel installs) ---
 if [[ "$BOOTSTRAP_SKIP_FLATPAK" == "1" ]]; then
   log "Skipping Flatpak installs (BOOTSTRAP_SKIP_FLATPAK=1)."
 else
-  flatpak install -y flathub com.brave.Browser || true
-  flatpak install -y flathub com.valvesoftware.Steam || true
-  flatpak install -y flathub com.visualstudio.code || true
+  update_progress 40 "Installing Flatpak applications..."
+  # Run flatpak installs in parallel for faster setup
+  flatpak install -y --noninteractive flathub com.brave.Browser &
+  pid_brave=$!
+  flatpak install -y --noninteractive flathub com.valvesoftware.Steam &
+  pid_steam=$!
+  flatpak install -y --noninteractive flathub com.visualstudio.code &
+  pid_vscode=$!
+  flatpak install -y --noninteractive flathub com.jetbrains.PyCharm-Professional &
+  pid_pycharm=$!
+  flatpak install -y --noninteractive flathub com.jetbrains.GoLand &
+  pid_goland=$!
+
+  # Wait for all flatpak installs to complete
+  wait "$pid_brave" 2>/dev/null || log "Brave browser install finished (may have had warnings)"
+  wait "$pid_steam" 2>/dev/null || log "Steam install finished (may have had warnings)"
+  wait "$pid_vscode" 2>/dev/null || log "VS Code install finished (may have had warnings)"
+  wait "$pid_pycharm" 2>/dev/null || log "PyCharm install finished (may have had warnings)"
+  wait "$pid_goland" 2>/dev/null || log "GoLand install finished (may have had warnings)"
 fi
 
 # --- APT installs when Flatpak isn't the right fit ---
 if [[ "$BOOTSTRAP_SKIP_APT_EXTRAS" == "1" ]]; then
   log "Skipping extra APT installs (BOOTSTRAP_SKIP_APT_EXTRAS=1)."
 else
+  update_progress 55 "Installing Wine and extras..."
   apt_install wine winetricks
 fi
 
@@ -180,6 +321,7 @@ fi
 if [[ "$BOOTSTRAP_SKIP_JETBRAINS" == "1" ]]; then
   log "Skipping JetBrains Toolbox (BOOTSTRAP_SKIP_JETBRAINS=1)."
 else
+  update_progress 65 "Installing JetBrains Toolbox..."
   apt_install tar
 JB_DIR="/opt/jetbrains-toolbox"
 JB_BIN="/usr/local/bin/jetbrains-toolbox"
@@ -224,6 +366,7 @@ fi
 if [[ "$BOOTSTRAP_SKIP_HOME_MANAGER" == "1" ]]; then
   log "Skipping Home Manager apply (BOOTSTRAP_SKIP_HOME_MANAGER=1)."
 else
+  update_progress 75 "Applying Home Manager configuration (this may take several minutes)..."
   as_user "$BOOTSTRAP_USER" bash -lc "
     set -euo pipefail
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
@@ -233,5 +376,12 @@ else
   "
 fi
 
+update_progress 95 "Finalizing setup..."
 mkdir -p "$SENTINEL_DIR"
 touch "$SENTINEL_FILE"
+
+update_progress 100 "Setup complete!"
+close_progress
+show_complete_notification
+
+log "First-boot setup completed successfully."
