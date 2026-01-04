@@ -70,6 +70,32 @@ if [[ -f /etc/default/nix-bootstrap ]]; then
 fi
 
 BOOTSTRAP_USER="${BOOTSTRAP_USER:-jordan}"
+BOOTSTRAP_TEST_MODE="${BOOTSTRAP_TEST_MODE-}"
+
+BOOTSTRAP_SKIP_NIX_INSTALL="${BOOTSTRAP_SKIP_NIX_INSTALL-}"
+BOOTSTRAP_SKIP_SYSTEMD="${BOOTSTRAP_SKIP_SYSTEMD-}"
+BOOTSTRAP_SKIP_FLATPAK="${BOOTSTRAP_SKIP_FLATPAK-}"
+BOOTSTRAP_SKIP_APT_EXTRAS="${BOOTSTRAP_SKIP_APT_EXTRAS-}"
+BOOTSTRAP_SKIP_JETBRAINS="${BOOTSTRAP_SKIP_JETBRAINS-}"
+BOOTSTRAP_SKIP_HOME_MANAGER="${BOOTSTRAP_SKIP_HOME_MANAGER-}"
+
+: "${BOOTSTRAP_TEST_MODE:=0}"
+
+if [[ "$BOOTSTRAP_TEST_MODE" == "1" ]]; then
+  : "${BOOTSTRAP_SKIP_NIX_INSTALL:=1}"
+  : "${BOOTSTRAP_SKIP_SYSTEMD:=1}"
+  : "${BOOTSTRAP_SKIP_FLATPAK:=1}"
+  : "${BOOTSTRAP_SKIP_APT_EXTRAS:=1}"
+  : "${BOOTSTRAP_SKIP_JETBRAINS:=1}"
+  : "${BOOTSTRAP_SKIP_HOME_MANAGER:=1}"
+else
+  : "${BOOTSTRAP_SKIP_NIX_INSTALL:=0}"
+  : "${BOOTSTRAP_SKIP_SYSTEMD:=0}"
+  : "${BOOTSTRAP_SKIP_FLATPAK:=0}"
+  : "${BOOTSTRAP_SKIP_APT_EXTRAS:=0}"
+  : "${BOOTSTRAP_SKIP_JETBRAINS:=0}"
+  : "${BOOTSTRAP_SKIP_HOME_MANAGER:=0}"
+fi
 
 if ! id "$BOOTSTRAP_USER" >/dev/null 2>&1; then
   log "User '$BOOTSTRAP_USER' does not exist; set BOOTSTRAP_USER in /etc/default/nix-bootstrap."
@@ -87,10 +113,14 @@ apt_install() {
 apt-get update
 apt_install ca-certificates curl git xz-utils flatpak gpg sudo
 
-# Ensure Flathub is available.
-flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+if [[ "$BOOTSTRAP_SKIP_FLATPAK" != "1" ]]; then
+  # Ensure Flathub is available.
+  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+fi
 
-if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
+if [[ "$BOOTSTRAP_SKIP_NIX_INSTALL" == "1" ]]; then
+  log "Skipping Nix install (BOOTSTRAP_SKIP_NIX_INSTALL=1)."
+elif [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
   if [[ -z "${HOME:-}" ]]; then
     log "\$HOME is not set; refusing to run Nix installer."
     exit 1
@@ -112,26 +142,45 @@ if getent group nix-users >/dev/null 2>&1; then
   usermod -aG nix-users "$BOOTSTRAP_USER" || true
 fi
 
-systemctl daemon-reload || true
-systemctl enable --now nix-daemon.socket >/dev/null 2>&1 || true
-systemctl start nix-daemon.service >/dev/null 2>&1 || true
+if [[ "$BOOTSTRAP_SKIP_SYSTEMD" == "1" ]]; then
+  log "Skipping systemd integration (BOOTSTRAP_SKIP_SYSTEMD=1)."
+elif command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  systemctl daemon-reload || true
+  systemctl enable --now nix-daemon.socket >/dev/null 2>&1 || true
+  systemctl start nix-daemon.service >/dev/null 2>&1 || true
+else
+  log "systemd not available; skipping nix-daemon systemctl steps."
+fi
 
 # --- GUI apps: Flatpak-first ---
-flatpak install -y flathub com.brave.Browser || true
-flatpak install -y flathub com.valvesoftware.Steam || true
-flatpak install -y flathub com.visualstudio.code || true
+if [[ "$BOOTSTRAP_SKIP_FLATPAK" == "1" ]]; then
+  log "Skipping Flatpak installs (BOOTSTRAP_SKIP_FLATPAK=1)."
+else
+  flatpak install -y flathub com.brave.Browser || true
+  flatpak install -y flathub com.valvesoftware.Steam || true
+  flatpak install -y flathub com.visualstudio.code || true
+fi
 
 # --- APT installs when Flatpak isn't the right fit ---
-apt_install wine winetricks
+if [[ "$BOOTSTRAP_SKIP_APT_EXTRAS" == "1" ]]; then
+  log "Skipping extra APT installs (BOOTSTRAP_SKIP_APT_EXTRAS=1)."
+else
+  apt_install wine winetricks
+fi
 
 # --- Keyboard: swap Ctrl and Alt (X11) ---
-apt_install x11-xkb-utils
-cat >/etc/profile.d/ctrl-alt-swap.sh <<'EOF'
+if [[ "$BOOTSTRAP_SKIP_APT_EXTRAS" != "1" ]]; then
+  apt_install x11-xkb-utils
+  cat >/etc/profile.d/ctrl-alt-swap.sh <<'EOF'
 setxkbmap -option ctrl:swap_lalt_lctl >/dev/null 2>&1 || true
 EOF
+fi
 
 # --- JetBrains Toolbox (optional convenience) ---
-apt_install tar
+if [[ "$BOOTSTRAP_SKIP_JETBRAINS" == "1" ]]; then
+  log "Skipping JetBrains Toolbox (BOOTSTRAP_SKIP_JETBRAINS=1)."
+else
+  apt_install tar
 JB_DIR="/opt/jetbrains-toolbox"
 JB_BIN="/usr/local/bin/jetbrains-toolbox"
 JB_DESKTOP="/usr/share/applications/jetbrains-toolbox.desktop"
@@ -169,15 +218,20 @@ else
 fi
 
 rm -rf "$tmpdir"
+fi
 
 # Apply Home Manager config from this repo.
-as_user "$BOOTSTRAP_USER" bash -lc "
-  set -euo pipefail
-  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-  export NIX_CONFIG='experimental-features = nix-command flakes'
-  cd '$repo_root'
-  nix run github:nix-community/home-manager -- switch --flake '.#${BOOTSTRAP_USER}@mint'
-"
+if [[ "$BOOTSTRAP_SKIP_HOME_MANAGER" == "1" ]]; then
+  log "Skipping Home Manager apply (BOOTSTRAP_SKIP_HOME_MANAGER=1)."
+else
+  as_user "$BOOTSTRAP_USER" bash -lc "
+    set -euo pipefail
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+    export NIX_CONFIG='experimental-features = nix-command flakes'
+    cd '$repo_root'
+    nix run github:nix-community/home-manager -- switch --flake '.#${BOOTSTRAP_USER}@mint'
+  "
+fi
 
 mkdir -p "$SENTINEL_DIR"
 touch "$SENTINEL_FILE"
