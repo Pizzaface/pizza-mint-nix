@@ -1,0 +1,15 @@
+[Unit]
+Description=First boot: install Nix + apply Home Manager for jordan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/default/nix-bootstrap
+ExecStart=/usr/local/bin/nix-bootstrap.sh
+RemainAfterExit=true
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

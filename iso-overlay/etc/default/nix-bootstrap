@@ -1,0 +1,11 @@
+BOOTSTRAP_USER=jordan
+
+# Git repo containing this flake + bootstrap implementation.
+# Point this at your fork if you want to update bootstrap behavior without rebuilding the ISO.
+BOOTSTRAP_REPO=https://github.com/Pizzaface/pizza-mint-nix.git
+
+# Git ref to deploy (branch/tag/commit). For commits, set BOOTSTRAP_REF to the SHA.
+BOOTSTRAP_REF=main
+
+# Where to clone the repo on the target machine.
+BOOTSTRAP_DIR=/home/jordan/pizza-mint-nix
