@@ -37,12 +37,32 @@
   };
 
   home.packages = with pkgs; [
+    # Search & utilities
     ripgrep
     direnv
+    btop
+    p7zip
+    imagemagick
+
+    # Media
     ffmpeg
 
+    # Languages & runtimes
     go
+    nodejs
+    python311
+
+    # Dev tools
+    mise
+    temporal-cli
+    git-lfs
+
+    # Cloud & networking
     awscli2
+    cloudflared
+    nmap
+
+    # Core CLI
     git
     curl
     jq

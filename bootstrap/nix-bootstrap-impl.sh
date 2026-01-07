@@ -195,6 +195,8 @@ BOOTSTRAP_SKIP_FLATPAK="${BOOTSTRAP_SKIP_FLATPAK-}"
 BOOTSTRAP_SKIP_APT_EXTRAS="${BOOTSTRAP_SKIP_APT_EXTRAS-}"
 BOOTSTRAP_SKIP_JETBRAINS="${BOOTSTRAP_SKIP_JETBRAINS-}"
 BOOTSTRAP_SKIP_HOME_MANAGER="${BOOTSTRAP_SKIP_HOME_MANAGER-}"
+BOOTSTRAP_SKIP_DOCKER="${BOOTSTRAP_SKIP_DOCKER-}"
+BOOTSTRAP_SKIP_TAILSCALE="${BOOTSTRAP_SKIP_TAILSCALE-}"
 
 : "${BOOTSTRAP_TEST_MODE:=0}"
 
@@ -205,6 +207,8 @@ if [[ "$BOOTSTRAP_TEST_MODE" == "1" ]]; then
   : "${BOOTSTRAP_SKIP_APT_EXTRAS:=1}"
   : "${BOOTSTRAP_SKIP_JETBRAINS:=1}"
   : "${BOOTSTRAP_SKIP_HOME_MANAGER:=1}"
+  : "${BOOTSTRAP_SKIP_DOCKER:=1}"
+  : "${BOOTSTRAP_SKIP_TAILSCALE:=1}"
 else
   : "${BOOTSTRAP_SKIP_NIX_INSTALL:=0}"
   : "${BOOTSTRAP_SKIP_SYSTEMD:=0}"
@@ -212,6 +216,8 @@ else
   : "${BOOTSTRAP_SKIP_APT_EXTRAS:=0}"
   : "${BOOTSTRAP_SKIP_JETBRAINS:=0}"
   : "${BOOTSTRAP_SKIP_HOME_MANAGER:=0}"
+  : "${BOOTSTRAP_SKIP_DOCKER:=0}"
+  : "${BOOTSTRAP_SKIP_TAILSCALE:=0}"
 fi
 
 if ! id "$BOOTSTRAP_USER" >/dev/null 2>&1; then
@@ -282,23 +288,52 @@ if [[ "$BOOTSTRAP_SKIP_FLATPAK" == "1" ]]; then
 else
   update_progress 40 "Installing Flatpak applications..."
   # Run flatpak installs in parallel for faster setup
+  declare -A flatpak_pids
+
+  # Browsers & Core
   flatpak install -y --noninteractive flathub com.brave.Browser &
-  pid_brave=$!
+  flatpak_pids[brave]=$!
+  flatpak install -y --noninteractive flathub org.mozilla.firefox &
+  flatpak_pids[firefox]=$!
+
+  # Gaming
   flatpak install -y --noninteractive flathub com.valvesoftware.Steam &
-  pid_steam=$!
+  flatpak_pids[steam]=$!
+  flatpak install -y --noninteractive flathub org.prismlauncher.PrismLauncher &
+  flatpak_pids[prism]=$!
+
+  # Development
   flatpak install -y --noninteractive flathub com.visualstudio.code &
-  pid_vscode=$!
+  flatpak_pids[vscode]=$!
   flatpak install -y --noninteractive flathub com.jetbrains.PyCharm-Professional &
-  pid_pycharm=$!
+  flatpak_pids[pycharm]=$!
   flatpak install -y --noninteractive flathub com.jetbrains.GoLand &
-  pid_goland=$!
+  flatpak_pids[goland]=$!
+  flatpak install -y --noninteractive flathub org.openscad.OpenSCAD &
+  flatpak_pids[openscad]=$!
+
+  # Media
+  flatpak install -y --noninteractive flathub org.videolan.VLC &
+  flatpak_pids[vlc]=$!
+  flatpak install -y --noninteractive flathub com.obsproject.Studio &
+  flatpak_pids[obs]=$!
+  flatpak install -y --noninteractive flathub org.audacityteam.Audacity &
+  flatpak_pids[audacity]=$!
+  flatpak install -y --noninteractive flathub org.shotcut.Shotcut &
+  flatpak_pids[shotcut]=$!
+  flatpak install -y --noninteractive flathub com.spotify.Client &
+  flatpak_pids[spotify]=$!
+
+  # Utilities
+  flatpak install -y --noninteractive flathub com.discordapp.Discord &
+  flatpak_pids[discord]=$!
+  flatpak install -y --noninteractive flathub com.bitwarden.desktop &
+  flatpak_pids[bitwarden]=$!
 
   # Wait for all flatpak installs to complete
-  wait "$pid_brave" 2>/dev/null || log "Brave browser install finished (may have had warnings)"
-  wait "$pid_steam" 2>/dev/null || log "Steam install finished (may have had warnings)"
-  wait "$pid_vscode" 2>/dev/null || log "VS Code install finished (may have had warnings)"
-  wait "$pid_pycharm" 2>/dev/null || log "PyCharm install finished (may have had warnings)"
-  wait "$pid_goland" 2>/dev/null || log "GoLand install finished (may have had warnings)"
+  for app in "${!flatpak_pids[@]}"; do
+    wait "${flatpak_pids[$app]}" 2>/dev/null || log "$app install finished (may have had warnings)"
+  done
 fi
 
 # --- APT installs when Flatpak isn't the right fit ---
